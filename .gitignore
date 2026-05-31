@@ -1,0 +1,19 @@
+# editor / tooling
+.claude/
+
+# secrets / environment-specific config
+.env
+
+# local-only compose override (bind-mounts ./config); Coolify must not see it
+docker-compose.override.yml
+
+# mounted credentials (kubeconfig + rclone.conf)
+config/
+
+# local dump output
+backups/
+
+# stray dumps / archives
+*.sql
+*.sql.gz
+*.zip
