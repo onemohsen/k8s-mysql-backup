@@ -15,7 +15,7 @@ fi
 
 # Build a crontab. We pass the current environment through to the job by
 # dumping it into a file the job sources, since cron runs with a bare env.
-printenv | grep -E '^(TARGETS|PASSWORD_VAR|BACKUP_DIR|RCLONE_REMOTE|RCLONE_PATH|RETENTION_DAYS|EXCLUDE_DBS|EXTRA_DUMP_FLAGS|KUBECONFIG|RCLONE_CONFIG|TZ)=' \
+printenv | grep -E '^(TARGETS|BACKUP_DIR|RCLONE_REMOTE|RCLONE_PATH|RETENTION_DAYS|EXCLUDE_DBS|DUMP_FLAGS|EXTRA_DUMP_FLAGS|KUBECONFIG|RCLONE_CONFIG|TZ)=' \
   | sed 's/^/export /' > /etc/backup.env
 
 cat > /etc/crontabs/root <<EOF

@@ -6,14 +6,14 @@ keeping a local copy too. **Each database gets its own file** — not one big
 `--all-databases` blob — so you can restore a single DB independently.
 
 ## How it works
-- You list the pods to back up in `TARGETS`. Each pod is found by **label selector**
-  at runtime, so it keeps working after redeploys (no hardcoded pod-name suffixes).
+- You list the pods to back up in `TARGETS` as `namespace/pod/user/password` entries.
 - For each pod it lists the databases (skipping `information_schema`,
   `performance_schema`, `sys`, `mysql`, plus anything in `EXCLUDE_DBS`) and runs one
   `mysqldump --databases <db>` per database, gzipped to its own file:
-  `<namespace>-<selector>-<database>-<timestamp>.sql.gz`.
-- The dump happens *inside* the pod via `kubectl exec`, so credentials never leave it —
-  user/password are read from the pod's own env vars (passed via `MYSQL_PWD`).
+  `<namespace>-<pod>-<database>-<timestamp>.sql.gz`.
+- The dump happens *inside* the pod via `kubectl exec`. The password is fed to
+  mysql/mysqldump over **stdin**, so it never appears on a process list and special
+  characters can't be re-parsed by a shell.
 - Each file is integrity-checked (`gzip -t`) before upload; a failed or truncated dump
   is removed and flagged, and the run exits non-zero.
 - Output is gzipped and written to `/backups` (a host volume).
@@ -44,17 +44,15 @@ cp .env.example .env
 Set `TARGETS`, `RCLONE_REMOTE`, `RCLONE_PATH` (bucket/path), `TZ`, and
 `CRON_SCHEDULE`. Set `TARGETARCH=arm64` if `uname -m` says `aarch64`.
 
-`TARGETS` is one entry per DB, **space-separated on a single line**. Two forms:
+`TARGETS` is one entry per DB, `namespace/pod/user/password`, **space-separated on a
+single line and wrapped in double quotes**:
 ```bash
-# namespace/selector                   -> user=root, password from $PASSWORD_VAR
-# namespace/selector/USER_VAR/PASS_VAR -> user & password from those in-pod env vars
-TARGETS=app-one/app=mysql app-two/app=mysql/MYSQL_USER/MYSQL_PASSWORD
+TARGETS="app-one/app-one-mysql-0/backup_user/p4ssw0rd app-two/app-two-mysql-0/backup_user/an0ther#pass"
 ```
-- **selector** = a label selector that resolves to the running pod. Confirm the real
-  labels with `kubectl get pod -n <namespace> --show-labels`.
-- **USER_VAR / PASS_VAR** = names of env vars that exist *inside* the pod (check with
-  `kubectl exec -n <ns> <pod> -- env | grep -i mysql`). The credentials never leave
-  the cluster.
+- **pod** = the exact pod name (`kubectl get pod -n <namespace>`).
+- **password** = everything after the 3rd `/`, so it may itself contain `/`.
+- ⚠️ **Quote the value.** Passwords often contain `#`, and the `.env` parser treats an
+  unquoted `#` as a comment and silently truncates the value.
 
 ### 3. Build and run
 ```bash
@@ -71,16 +69,14 @@ This runs one backup right now and exits. Check ./backups/ and your S3 bucket.
 
 ## Common tweaks
 - **Skip extra databases** → set `EXCLUDE_DBS="db1 db2"` (system schemas are always skipped).
-- **Per-pod user/password** → append both env var names: `ns/selector/USER_VAR/PASS_VAR`.
-- **Restricted app user can't dump events/routines** → that user may lack privileges;
-  use the root var for that target, or add overrides via `EXTRA_DUMP_FLAGS`.
-- **Find the right env var names** → `kubectl exec -n NS POD -- env | grep -i mysql`.
-- **Find the right label** → `kubectl get pod -n NS --show-labels`.
+- **Restricted user can't dump events/routines** → override the whole flag set, e.g.
+  `DUMP_FLAGS="--single-transaction --quick --no-tablespaces"`.
+- **Find pod names** → `kubectl get pod -n <namespace>`.
+- **Check a user can list/dump** → `kubectl exec -n NS POD -- sh -c 'mysql -uUSER -pPASS -e "SHOW DATABASES"'`.
 
 ## Restore a single database
 ```bash
-gunzip -c app-one-app_mysql-mydb-2026-06-01-0200.sql.gz \
-  | kubectl exec -i -n app-one <pod> -- sh -c 'mysql -u root -p"$MYSQL_ROOT_PASSWORD"'
+gunzip -c app-one-app-one-mysql-0-mydb-2026-06-01-0200.sql.gz \
+  | kubectl exec -i -n app-one app-one-mysql-0 -- sh -c 'mysql -ubackup_user -p"p4ssw0rd"'
 ```
 Each file carries `CREATE DATABASE IF NOT EXISTS` + `USE`, so it restores standalone.
-- **Per-pod single DB instead of --all-databases** → edit `backup.sh`.

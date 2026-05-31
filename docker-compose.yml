@@ -13,19 +13,16 @@ services:
     environment:
       CRON_SCHEDULE: ${CRON_SCHEDULE:-0 2 * * *}
       TZ: ${TZ:-UTC}
-      TARGETS: ${TARGETS:?set TARGETS, e.g. ns/app=mysql/MYSQL_USER/MYSQL_PASSWORD}
-      PASSWORD_VAR: ${PASSWORD_VAR:-MYSQL_ROOT_PASSWORD}
+      TARGETS: ${TARGETS:?set TARGETS, e.g. namespace/pod/user/password}
+      EXCLUDE_DBS: ${EXCLUDE_DBS:-}
+      DUMP_FLAGS: ${DUMP_FLAGS:-}
       EXTRA_DUMP_FLAGS: ${EXTRA_DUMP_FLAGS:-}
       RCLONE_REMOTE: ${RCLONE_REMOTE:-s3}
       RCLONE_PATH: ${RCLONE_PATH:?set RCLONE_PATH, e.g. my-bucket/mysql-backups}
       RETENTION_DAYS: ${RETENTION_DAYS:-7}
     volumes:
-      # Dumps persist across redeploys (named volume managed by the host).
+      - ./config:/config
       - backups:/backups
-      # kubeconfig + rclone.conf:
-      #   - Coolify: add via Storages -> File Mount at /config/kubeconfig and
-      #     /config/rclone.conf (paste contents in the UI). See COOLIFY.md.
-      #   - Local: provided by docker-compose.override.yml (gitignored).
 
 volumes:
   backups:

@@ -4,8 +4,6 @@
 # secrets / environment-specific config
 .env
 
-# local-only compose override (bind-mounts ./config); Coolify must not see it
-docker-compose.override.yml
 
 # mounted credentials (kubeconfig + rclone.conf)
 config/
