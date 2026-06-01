@@ -53,15 +53,23 @@ back to interpolating the password into an `sh -c` string.
 with `mysqldump ... --databases <db>` piped through `gzip` to
 `/backups/<ns>-<pod>-<db>-<stamp>.sql.gz`. `--databases <db>` makes each file
 self-contained (`CREATE DATABASE IF NOT EXISTS` + `USE`); the flag set lives in `DUMP_FLAGS`
-(overridable) + `EXTRA_DUMP_FLAGS` (appended). With `set -o pipefail` a failed `mysqldump`
-fails the pipe; each file is then checked with `gzip -t` and a ≥1KB floor before counting as
-success. Per-DB snapshots are individually consistent but not consistent *across* a pod's DBs.
+(overridable) + `EXTRA_DUMP_FLAGS` (appended), and `EXCLUDE_TABLES` adds per-DB
+`--ignore-table` flags. The `dump_one_db` helper validates each file three ways before it
+counts as success — **`mysqldump`'s own exit code (`PIPESTATUS[0]`, not gzip's), `gzip -t`,
+AND the in-band `-- Dump completed` footer** — because `kubectl exec` can return 0 on a
+dropped stream and `gzip` then wraps the partial output into a *valid* `.gz` that passes
+`gzip -t` + a size floor. A failing dump is retried (`DUMP_RETRIES`/`DUMP_BACKOFF`), then
+removed. **Do not add `--compact`/`--skip-comments` to `DUMP_FLAGS`** — they delete the
+footer the completeness check relies on. Per-DB snapshots are individually consistent but
+not consistent *across* a pod's DBs.
 
 **`entrypoint.sh` works around cron's bare environment.** `crond` jobs don't inherit the
-container env, so the entrypoint greps the relevant vars out of `printenv`, writes them to
-`/etc/backup.env`, and the crontab line `source`s that file before running `backup.sh`.
-If you add a new env var that `backup.sh` reads, you must also add it to that grep filter,
-or it will be missing under cron (but present in `once` mode — a classic gotcha).
+container env, so the entrypoint greps the relevant vars out of `printenv`, **single-quotes
+each value** (so a value with spaces — multi-target `TARGETS`, multi-flag `DUMP_FLAGS` —
+doesn't break when cron's `/bin/sh` sources it), writes them to `/etc/backup.env`, and the
+crontab line `source`s that file before running `backup.sh`. If you add a new env var that
+`backup.sh` reads, you must also add it to that grep filter, or it will be missing under
+cron (but present in `once` mode — a classic gotcha).
 
 **Failures are aggregated, not fail-fast.** `backup.sh` sets `FAILED=1` and continues on a
 bad target/dump/upload so one broken DB doesn't block the others; it exits non-zero at the

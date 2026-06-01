@@ -15,8 +15,15 @@ fi
 
 # Build a crontab. We pass the current environment through to the job by
 # dumping it into a file the job sources, since cron runs with a bare env.
-printenv | grep -E '^(TARGETS|BACKUP_DIR|RCLONE_REMOTE|RCLONE_PATH|RETENTION_DAYS|EXCLUDE_DBS|DUMP_FLAGS|EXTRA_DUMP_FLAGS|KUBECONFIG|RCLONE_CONFIG|TZ)=' \
-  | sed 's/^/export /' > /etc/backup.env
+# Each value is single-quoted (with embedded ' escaped) so values containing
+# spaces -- multi-target TARGETS, multi-flag DUMP_FLAGS -- survive being sourced
+# by cron's /bin/sh. Without quoting, `export TARGETS=a b c` breaks under cron.
+: > /etc/backup.env
+printenv | grep -E '^(TARGETS|BACKUP_DIR|RCLONE_REMOTE|RCLONE_PATH|RETENTION_DAYS|EXCLUDE_DBS|EXCLUDE_TABLES|DUMP_FLAGS|EXTRA_DUMP_FLAGS|DUMP_RETRIES|DUMP_BACKOFF|KUBECONFIG|RCLONE_CONFIG|TZ)=' \
+  | while IFS='=' read -r name value; do
+      esc=$(printf '%s' "$value" | sed "s/'/'\\\\''/g")
+      printf "export %s='%s'\n" "$name" "$esc" >> /etc/backup.env
+    done
 
 cat > /etc/crontabs/root <<EOF
 ${CRON_SCHEDULE} . /etc/backup.env; /usr/local/bin/backup.sh >> /proc/1/fd/1 2>&1

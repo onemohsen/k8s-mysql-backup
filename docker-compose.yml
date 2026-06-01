@@ -15,8 +15,11 @@ services:
       TZ: ${TZ:-UTC}
       TARGETS: ${TARGETS:?set TARGETS, e.g. namespace/pod/user/password}
       EXCLUDE_DBS: ${EXCLUDE_DBS:-}
+      EXCLUDE_TABLES: ${EXCLUDE_TABLES:-}
       DUMP_FLAGS: ${DUMP_FLAGS:-}
       EXTRA_DUMP_FLAGS: ${EXTRA_DUMP_FLAGS:-}
+      DUMP_RETRIES: ${DUMP_RETRIES:-3}
+      DUMP_BACKOFF: ${DUMP_BACKOFF:-15}
       RCLONE_REMOTE: ${RCLONE_REMOTE:-s3}
       RCLONE_PATH: ${RCLONE_PATH:?set RCLONE_PATH, e.g. my-bucket/mysql-backups}
       RETENTION_DAYS: ${RETENTION_DAYS:-7}
