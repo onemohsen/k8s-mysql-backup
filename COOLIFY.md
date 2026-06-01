@@ -61,7 +61,10 @@ dumps survive redeploys. It appears under Storages; nothing to configure.
   Look for `Finished successfully` and confirm objects land in your bucket.
 
 ## Notes
-- The kubeconfig user needs `pods/exec` rights in each target namespace.
+- The kubeconfig user needs `pods/exec` rights in each target namespace (this also covers
+  `kubectl cp`, which runs over exec).
+- Target pods must have `gzip` and `tar` (the dump is gzipped in-pod and `kubectl cp` uses
+  `tar`); both ship in the standard MySQL images.
 - Every non-system database is dumped to its own file; add `EXCLUDE_DBS` (space-
   separated) to skip more.
 - A user only dumps what it has privileges on (events/routines need extra grants); if its

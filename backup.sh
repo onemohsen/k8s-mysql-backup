@@ -33,7 +33,10 @@ SYS_DBS="information_schema performance_schema sys mysql"
 #   --max-allowed-packet=1G       -> don't abort on huge rows (e.g. Laravel
 #                                    Telescope JSON); default 24M can truncate
 #   --set-gtid-purged=OFF         -> portable restore into an existing/GTID server
-#   --databases <db>              -> file recreates the DB (CREATE/USE headers)
+# The database is dumped POSITIONALLY (mysqldump ... <db>), NOT with --databases,
+# so the file holds only table DDL + data -- no CREATE DATABASE / USE. That makes
+# it portable: restore into ANY database with `mysql <target_db> < dump.sql`
+# (like spatie/db-dumper). The target DB must already exist.
 # NB: do NOT add --compact / --skip-comments here — the dump's trailing
 #     "-- Dump completed" line is our completeness marker (see dump_one_db).
 DUMP_FLAGS="${DUMP_FLAGS:-"--single-transaction --quick --routines --triggers \
@@ -50,48 +53,68 @@ pod_mysql() {
     'IFS= read -r MYSQL_PWD; export MYSQL_PWD; exec "$@"' _ "$@"
 }
 
-# Dump ONE database to a gzipped file, verified, with retries.
-# WHY: a streamed mysqldump can be SILENTLY TRUNCATED -- kubectl exec can return 0
-# on a dropped stream, and gzip then wraps the partial output into a *valid* .gz.
-# So `gzip -t` and a size floor are NOT enough. We verify three independent things:
-#   1. mysqldump's OWN exit status (PIPESTATUS[0], not gzip's),
-#   2. the gzip frame is intact (gzip -t),
-#   3. the in-band "-- Dump completed" footer mysqldump writes LAST on success.
-# Only all three together prove the dump arrived whole.
+# Dump ONE database, verified, with retries -- by doing the slow work INSIDE the
+# pod and moving only a small, already-verified file across the wire.
+#
+# WHY NOT just stream `mysqldump | gzip` out over kubectl exec: a long-lived exec
+# stream of a large dump can be SILENTLY TRUNCATED (kubectl exec can return 0 on a
+# dropped stream; gzip then wraps the partial output into a *valid* .gz). So:
+#   1. mysqldump | gzip -> a temp file INSIDE the pod. The data never crosses the
+#      exec stream while it's being generated; only a tiny status line does.
+#   2. Verify the file IN-POD: gzip frame intact AND the "-- Dump completed" footer
+#      mysqldump writes LAST. The dump's own exit code is trustworthy here (local,
+#      no lying transport), and the footer proves completeness regardless.
+#   3. `kubectl cp` the small .gz out, then RE-VERIFY on the host (kubectl cp can
+#      itself truncate large files), and remove the pod-side temp.
+# Requires `gzip` and `tar` in the target pod (tar is what kubectl cp uses).
 # Usage: dump_one_db NS POD PASS USER DB OUTFILE [extra mysqldump args...]
 dump_one_db() {
   local ns="$1" pod="$2" pass="$3" user="$4" db="$5" outfile="$6"; shift 6
-  local attempt=1 rc errfile
-  errfile="$(mktemp)"
+  local attempt=1 status podtmp
+  podtmp="/tmp/k8s-mysql-backup-$(basename "$outfile")"
 
   while [ "$attempt" -le "$DUMP_RETRIES" ]; do
     rm -f "$outfile"
 
-    # Capture mysqldump's real status: temporarily drop errexit so the pipeline
-    # can't abort the script before we read PIPESTATUS. stderr -> errfile so a
-    # "Lost connection ... when dumping table X" is logged, not swallowed.
-    set +e
-    pod_mysql "$ns" "$pod" "$pass" \
-        mysqldump -u"$user" $DUMP_FLAGS $EXTRA_DUMP_FLAGS "$@" --databases "$db" 2>"$errfile" \
-      | gzip > "$outfile"
-    rc=${PIPESTATUS[0]}
-    set -e
+    # (1)+(2): dump + gzip + verify entirely inside the pod. The password arrives
+    # on stdin; the mysqldump argv is passed as real args (no shell re-parsing).
+    # exec's stdout carries only the short INPOD_OK/INPOD_FAIL status line.
+    status=$(printf '%s\n' "$pass" | kubectl exec -i -n "$ns" "$pod" -- sh -c '
+      IFS= read -r MYSQL_PWD; export MYSQL_PWD
+      tmp=$1; shift
+      "$@" 2>/tmp/k8sbk.err | gzip > "$tmp"
+      if gzip -t "$tmp" 2>/dev/null \
+         && [ "$(wc -c <"$tmp")" -ge 1024 ] \
+         && gzip -dc "$tmp" 2>/dev/null | tail -n 5 | grep -q -- "-- Dump completed"; then
+        echo "INPOD_OK size=$(wc -c <"$tmp")"
+      else
+        echo "INPOD_FAIL: $(tr "\n" "|" </tmp/k8sbk.err | cut -c1-300)"
+        rm -f "$tmp"
+      fi
+      rm -f /tmp/k8sbk.err
+    ' _ "$podtmp" mysqldump -u"$user" $DUMP_FLAGS $EXTRA_DUMP_FLAGS "$@" "$db") || true
 
-    if [ "$rc" -eq 0 ] \
+    if ! printf '%s' "$status" | grep -q '^INPOD_OK'; then
+      log "    attempt ${attempt}/${DUMP_RETRIES}: in-pod dump failed for '$db' (${status:-no status from pod})"
+      attempt=$((attempt + 1)); [ "$attempt" -le "$DUMP_RETRIES" ] && sleep $((DUMP_BACKOFF * (attempt - 1)))
+      continue
+    fi
+
+    # (3): move the small, verified .gz out, then re-verify on the host. Clean up
+    # the pod-side temp on every path.
+    if kubectl cp --retries=3 "$ns/$pod:$podtmp" "$outfile" >/dev/null 2>&1 \
        && gzip -t "$outfile" 2>/dev/null \
-       && [ "$(stat -c%s "$outfile")" -ge 1024 ] \
        && gzip -dc "$outfile" 2>/dev/null | tail -n 5 | grep -q -- '-- Dump completed'; then
-      rm -f "$errfile"
+      kubectl exec -n "$ns" "$pod" -- rm -f "$podtmp" >/dev/null 2>&1 || true
       return 0
     fi
 
-    log "    attempt ${attempt}/${DUMP_RETRIES} failed for '$db' (mysqldump rc=$rc)"
-    [ -s "$errfile" ] && log "    mysqldump: $(tr '\n' '|' < "$errfile" | cut -c1-300)"
-    attempt=$((attempt + 1))
-    [ "$attempt" -le "$DUMP_RETRIES" ] && sleep $((DUMP_BACKOFF * (attempt - 1)))
+    log "    attempt ${attempt}/${DUMP_RETRIES}: kubectl cp / host re-verify failed for '$db'"
+    kubectl exec -n "$ns" "$pod" -- rm -f "$podtmp" >/dev/null 2>&1 || true
+    rm -f "$outfile"
+    attempt=$((attempt + 1)); [ "$attempt" -le "$DUMP_RETRIES" ] && sleep $((DUMP_BACKOFF * (attempt - 1)))
   done
 
-  rm -f "$outfile" "$errfile"   # never leave a truncated dump behind
   return 1
 }
 

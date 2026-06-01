@@ -48,20 +48,25 @@ the process list); the command + args pass as real argv via `exec "$@"` (no shel
 re-parsing, so special chars in user/db/flags are safe). **Preserve this** — do not fall
 back to interpolating the password into an `sh -c` string.
 
-**One file per database, validated.** Per pod, `backup.sh` lists databases
-(`mysql -N -B -e 'SHOW DATABASES'`), skips system schemas + `EXCLUDE_DBS`, then dumps each
-with `mysqldump ... --databases <db>` piped through `gzip` to
-`/backups/<ns>-<pod>-<db>-<stamp>.sql.gz`. `--databases <db>` makes each file
-self-contained (`CREATE DATABASE IF NOT EXISTS` + `USE`); the flag set lives in `DUMP_FLAGS`
-(overridable) + `EXTRA_DUMP_FLAGS` (appended), and `EXCLUDE_TABLES` adds per-DB
-`--ignore-table` flags. The `dump_one_db` helper validates each file three ways before it
-counts as success — **`mysqldump`'s own exit code (`PIPESTATUS[0]`, not gzip's), `gzip -t`,
-AND the in-band `-- Dump completed` footer** — because `kubectl exec` can return 0 on a
-dropped stream and `gzip` then wraps the partial output into a *valid* `.gz` that passes
-`gzip -t` + a size floor. A failing dump is retried (`DUMP_RETRIES`/`DUMP_BACKOFF`), then
-removed. **Do not add `--compact`/`--skip-comments` to `DUMP_FLAGS`** — they delete the
-footer the completeness check relies on. Per-DB snapshots are individually consistent but
-not consistent *across* a pod's DBs.
+**One file per database, dumped in-pod then copied out.** Per pod, `backup.sh` lists
+databases (`mysql -N -B -e 'SHOW DATABASES'`), skips system schemas + `EXCLUDE_DBS`, then
+for each DB calls `dump_one_db`, which does the slow work **inside the pod**:
+`mysqldump ... <db> | gzip > /tmp/...sql.gz` in-pod, verifies it in-pod (gzip
+frame + the `-- Dump completed` footer), and only then `kubectl cp`s the finished file to
+`/backups/<ns>-<pod>-<db>-<stamp>.sql.gz` and **re-verifies it on the host** (kubectl cp can
+itself truncate). **WHY in-pod, not a streamed `mysqldump | gzip` over `kubectl exec`:** a
+long-lived exec stream of a large dump gets silently truncated — `kubectl exec` can return 0
+on a dropped stream and `gzip` then wraps the partial output into a *valid* `.gz`. Doing the
+dump in-pod means only a small, already-verified file crosses the wire (and tiny status
+lines, which can't meaningfully truncate). The DB is dumped **positionally** (`mysqldump … <db>`),
+NOT with `--databases`, so the file holds only table DDL + data — no `CREATE DATABASE`/`USE`
+— and restores into any target DB (`mysql <target> < dump.sql`), like spatie/db-dumper. The
+flag set lives in `DUMP_FLAGS` (overridable) + `EXTRA_DUMP_FLAGS` (appended), and
+`EXCLUDE_TABLES` adds per-DB `--ignore-table` flags. A
+failing dump is retried (`DUMP_RETRIES`/`DUMP_BACKOFF`), then removed. **Do not add
+`--compact`/`--skip-comments` to `DUMP_FLAGS`** — they delete the footer the completeness
+check relies on. Target pods must have `gzip` and `tar` (kubectl cp uses tar). Per-DB
+snapshots are individually consistent but not consistent *across* a pod's DBs.
 
 **`entrypoint.sh` works around cron's bare environment.** `crond` jobs don't inherit the
 container env, so the entrypoint greps the relevant vars out of `printenv`, **single-quotes
